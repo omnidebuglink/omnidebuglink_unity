@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using UnityEngine.UI;
 
 namespace OmniDebugLink
 {
@@ -34,7 +35,8 @@ namespace OmniDebugLink
                     "path selects the starting node (\"/\"-separated from scene root, e.g. \"Canvas/Panel\"); " +
                     "empty path means all loaded scenes including DontDestroyOnLoad. " +
                     "depth is how many levels to include; 0 or 1 returns only the top level. " +
-                    "Each node reports name, active state, component type names, childCount and children.",
+                    "Each node reports name, active state, component type names, childCount and children; " +
+                    "nodes rendering text (UGUI Text / TextMeshPro / InputField) also report their current text value.",
                 payloadSchema:
                     "{\"type\":\"object\",\"properties\":{" +
                     "\"path\":{\"type\":\"string\",\"default\":\"\",\"description\":\"node path from scene root; empty = all loaded scenes\"}," +
@@ -163,6 +165,28 @@ namespace OmniDebugLink
             return sb.ToString();
         }
 
+        /// <summary>
+        /// The display text this node renders, or null: UGUI Text, an InputField's current
+        /// value, or TextMeshPro's text via reflection (TMP is a package dependency, so it
+        /// cannot be referenced directly). Shared with find_objects / ui_click so "find by
+        /// visible text" works the way it does on the other clients.
+        /// </summary>
+        internal static string DisplayTextOf(Component[] comps)
+        {
+            foreach (var c in comps)
+            {
+                if (c is Text label) return label.text;
+                if (c is InputField field) return field.text;
+                var typeName = c == null ? null : c.GetType().Name;
+                if (typeName == "TextMeshProUGUI" || typeName == "TextMeshPro" || typeName == "TMP_Text")
+                {
+                    if (c.GetType().GetProperty("text")?.GetValue(c, null) is string s)
+                        return s;
+                }
+            }
+            return null;
+        }
+
         private static Transform FindChild(Transform parent, string name)
         {
             for (var i = 0; i < parent.childCount; i++)
@@ -182,8 +206,9 @@ namespace OmniDebugLink
             }
             count++;
 
+            var comps = t.GetComponents<Component>();
             var components = new JArray();
-            foreach (var c in t.GetComponents<Component>())
+            foreach (var c in comps)
             {
                 if (c != null) components.Add(c.GetType().Name);
             }
@@ -195,6 +220,9 @@ namespace OmniDebugLink
                 ["components"] = components,
                 ["childCount"] = t.childCount,
             };
+            // Only present when the node actually renders text, to keep dumps small.
+            var text = DisplayTextOf(comps);
+            if (!string.IsNullOrEmpty(text)) node["text"] = text;
 
             if (level < maxLevel)
             {

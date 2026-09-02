@@ -4,13 +4,15 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
+using UnityEngine.EventSystems;
 
 namespace OmniDebugLink
 {
     /// <summary>
-    /// find_objects — query the runtime hierarchy by name (substring or regex)
-    /// and/or component type, returning "/"-separated paths. The cheap,
-    /// iterative alternative to dumping the whole scene via scene_traverse.
+    /// find_objects — query the runtime hierarchy by node name (substring or regex),
+    /// by the text a node renders (UGUI Text / TMP / InputField value), and/or by
+    /// component type, returning "/"-separated paths. The cheap, iterative
+    /// alternative to dumping the whole scene via scene_traverse.
     /// </summary>
     internal static class FindObjectsTask
     {
@@ -23,33 +25,45 @@ namespace OmniDebugLink
                 "find_objects",
                 Handle,
                 description:
-                    "Find GameObjects by name (substring, or full regex when regex=true) and optional " +
-                    "component type, returning their scene-root paths for use with view_component/ui_click. " +
+                    "Find GameObjects by node name (substring, or full regex when regex=true), by the " +
+                    "text they render (UGUI Text / TextMeshPro / InputField value, substring — this is " +
+                    "how you find a button by its label), and/or by component type. Returns scene-root " +
+                    "paths; nodes matched by text also report click_target (the nearest clickable " +
+                    "ancestor) so ui_click(click_target) presses the button the label belongs to. " +
                     "active_only=false includes inactive objects. Much cheaper than scene_traverse when " +
-                    "you already know roughly what you are looking for.",
+                    "you know roughly what you are looking for.",
                 payloadSchema:
                     "{\"type\":\"object\",\"properties\":{" +
-                    "\"name\":{\"type\":\"string\",\"description\":\"name to match (substring, case-insensitive; regex when regex=true)\"}," +
+                    "\"name\":{\"type\":\"string\",\"description\":\"GameObject name to match (substring, case-insensitive; regex when regex=true)\"}," +
+                    "\"text\":{\"type\":\"string\",\"description\":\"display text to match (substring, case-insensitive) — the label a Text/TMP node renders or an InputField's current value\"}," +
                     "\"regex\":{\"type\":\"boolean\",\"default\":false,\"description\":\"treat name as a regular expression\"}," +
                     "\"component\":{\"type\":\"string\",\"description\":\"also require this component type (full or short name)\"}," +
                     "\"active_only\":{\"type\":\"boolean\",\"default\":true,\"description\":\"skip inactiveInHierarchy objects\"}" +
                     "},\"additionalProperties\":false}");
         }
 
+        /// <summary>One hierarchy hit, shared by find_objects and ui_click's text locating.</summary>
+        internal sealed class Match
+        {
+            public Transform Node;
+            /// <summary>The text the node renders; null when it renders none (name/component hit).</summary>
+            public string DisplayText;
+            public string Scene;
+        }
+
         private static Task<object> Handle(OmniDebugLinkTask task)
         {
             var p = task.Payload;
-            // Cross-platform habit: the other clients' find_objects match by "text" —
-            // accept it as an alias so AI tools moving between platforms don't trip.
-            var name = (((string)p["name"]) ?? (string)p["text"])?.Trim();
+            var name = ((string)p["name"])?.Trim();
+            var text = ((string)p["text"])?.Trim();
             var useRegex = p["regex"]?.Value<bool>() ?? false;
             var component = ((string)p["component"])?.Trim();
             var activeOnly = p["active_only"]?.Value<bool>() ?? true;
-            if (string.IsNullOrEmpty(name) && string.IsNullOrEmpty(component))
+            if (string.IsNullOrEmpty(name) && string.IsNullOrEmpty(text) && string.IsNullOrEmpty(component))
                 throw new ArgumentException(
-                    "provide 'name' (substring, case-insensitive, or a regex with regex=true) " +
-                    "and/or 'component' to match" + DescribePayloadKeys(p) +
-                    "; to dump the whole scene use scene_traverse instead");
+                    "provide 'name' (node-name substring, or a regex with regex=true), 'text' " +
+                    "(the text the node renders, e.g. a button label) and/or 'component' to match" +
+                    DescribePayloadKeys(p) + "; to dump the whole scene use scene_traverse instead");
 
             Regex regex = null;
             if (useRegex && !string.IsNullOrEmpty(name))
@@ -58,58 +72,81 @@ namespace OmniDebugLink
                 catch (ArgumentException e) { throw new ArgumentException($"invalid regex: {e.Message}"); }
             }
 
-            var matches = new JArray();
-            var scanned = 0;
-            var truncated = false;
+            var matches = Query(name, regex, text, component, activeOnly,
+                SceneTraverseTask.RuntimeScenes(), out var truncated);
 
-            foreach (var (sceneName, ddol, roots) in SceneTraverseTask.RuntimeScenes())
+            var objects = new JArray();
+            foreach (var m in matches)
             {
-                foreach (var root in roots)
-                    Scan(root, sceneName, ddol, name, regex, component, activeOnly,
-                        matches, ref scanned, ref truncated);
-                if (truncated) break;
+                var o = new JObject
+                {
+                    ["path"] = SceneTraverseTask.BuildPath(m.Node),
+                    ["name"] = m.Node.name,
+                    ["active"] = m.Node.gameObject.activeSelf,
+                    ["scene"] = m.Scene,
+                };
+                if (m.DisplayText != null) o["text"] = m.DisplayText;
+                var clickable = ClickTargetOf(m.Node);
+                if (clickable != null) o["click_target"] = clickable;
+                objects.Add(o);
             }
 
             return Task.FromResult<object>(new JObject
             {
-                ["count"] = matches.Count,
+                ["count"] = objects.Count,
                 ["truncated"] = truncated,
-                ["objects"] = matches,
+                ["objects"] = objects,
             });
         }
 
-        /// <summary>Append the payload's actual keys to a validation error, so an AI
-        /// sending a wrongly-named field can correct itself in one round-trip.</summary>
-        private static string DescribePayloadKeys(JObject p)
+        /// <summary>
+        /// Shared hierarchy query (find_objects, and ui_click's text locating). All given
+        /// conditions must hold. Scans at most <see cref="MaxScanNodes"/> nodes and returns
+        /// at most <see cref="MaxResults"/> matches.
+        /// </summary>
+        internal static List<Match> Query(string name, Regex regex, string text, string component,
+            bool activeOnly, List<(string name, bool ddol, IEnumerable<Transform> roots)> scenes,
+            out bool truncated)
         {
-            var keys = new List<string>();
-            foreach (var prop in p.Properties()) keys.Add(prop.Name);
-            return keys.Count == 0
-                ? " (payload was empty)"
-                : $" (payload keys sent: {string.Join(", ", keys)})";
+            var matches = new List<Match>();
+            var scanned = 0;
+            truncated = false;
+
+            foreach (var (sceneName, ddol, roots) in scenes)
+            {
+                foreach (var root in roots)
+                    Scan(root, ddol ? "DontDestroyOnLoad" : sceneName, name, regex, text, component,
+                        activeOnly, matches, ref scanned, ref truncated);
+                if (truncated) break;
+            }
+            return matches;
         }
 
-        private static void Scan(Transform t, string sceneName, bool ddol, string name, Regex regex,
-            string component, bool activeOnly, JArray matches, ref int scanned, ref bool truncated)
+        private static void Scan(Transform t, string sceneName, string name, Regex regex, string text,
+            string component, bool activeOnly, List<Match> matches, ref int scanned, ref bool truncated)
         {
             if (truncated) return;
             if (++scanned > MaxScanNodes) { truncated = true; return; }
             if (matches.Count >= MaxResults) { truncated = true; return; }
 
             var go = t.gameObject;
-            if ((!activeOnly || go.activeInHierarchy) && NameMatches(go.name, name, regex) && HasComponent(go, component))
+            var comps = go.GetComponents<Component>();
+            if ((!activeOnly || go.activeInHierarchy)
+                && NameMatches(go.name, name, regex)
+                && TextMatches(comps, text)
+                && HasComponent(comps, component))
             {
-                matches.Add(new JObject
+                matches.Add(new Match
                 {
-                    ["path"] = SceneTraverseTask.BuildPath(t),
-                    ["name"] = go.name,
-                    ["active"] = go.activeSelf,
-                    ["scene"] = ddol ? "DontDestroyOnLoad" : sceneName,
+                    Node = t,
+                    DisplayText = SceneTraverseTask.DisplayTextOf(comps),
+                    Scene = sceneName,
                 });
             }
 
             for (var i = 0; i < t.childCount; i++)
-                Scan(t.GetChild(i), sceneName, ddol, name, regex, component, activeOnly, matches, ref scanned, ref truncated);
+                Scan(t.GetChild(i), sceneName, name, regex, text, component, activeOnly,
+                    matches, ref scanned, ref truncated);
         }
 
         private static bool NameMatches(string nodeName, string name, Regex regex)
@@ -120,10 +157,18 @@ namespace OmniDebugLink
                 : nodeName.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
-        private static bool HasComponent(GameObject go, string want)
+        private static bool TextMatches(Component[] comps, string text)
+        {
+            if (string.IsNullOrEmpty(text)) return true;
+            var rendered = SceneTraverseTask.DisplayTextOf(comps);
+            return rendered != null &&
+                   rendered.IndexOf(text, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool HasComponent(Component[] comps, string want)
         {
             if (string.IsNullOrEmpty(want)) return true;
-            foreach (var c in go.GetComponents<Component>())
+            foreach (var c in comps)
             {
                 if (c == null) continue;
                 var type = c.GetType();
@@ -151,6 +196,27 @@ namespace OmniDebugLink
                     return true;
             }
             return false;
+        }
+
+        /// <summary>Path of the nearest ancestor (or self) that handles pointer clicks —
+        /// what ui_click should be pointed at when this node is just a label. Null when
+        /// nothing up the chain handles clicks (UGUI semantics; NGUI/FairyGUI users
+        /// should resolve paths via view_component instead).</summary>
+        internal static string ClickTargetOf(Transform t)
+        {
+            var handler = ExecuteEvents.GetEventHandler<IPointerClickHandler>(t.gameObject);
+            return handler == null ? null : SceneTraverseTask.BuildPath(handler.transform);
+        }
+
+        /// <summary>Append the payload's actual keys to a validation error, so an AI
+        /// sending a wrongly-named field can correct itself in one round-trip.</summary>
+        internal static string DescribePayloadKeys(JObject p)
+        {
+            var keys = new List<string>();
+            foreach (var prop in p.Properties()) keys.Add(prop.Name);
+            return keys.Count == 0
+                ? " (payload was empty)"
+                : $" (payload keys sent: {string.Join(", ", keys)})";
         }
     }
 }
