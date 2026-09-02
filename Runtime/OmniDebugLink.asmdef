@@ -5,9 +5,7 @@
     "Newtonsoft.Json"
   ],
   "includePlatforms": [],
-  "excludePlatforms": [
-    "WebGL"
-  ],
+  "excludePlatforms": [],
   "allowUnsafeCode": false,
   "overrideReferences": false,
   "precompiledReferences": [],

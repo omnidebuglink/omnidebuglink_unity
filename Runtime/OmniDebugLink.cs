@@ -1,9 +1,6 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Net.WebSockets;
-using System.Text;
-using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
@@ -148,7 +145,7 @@ namespace OmniDebugLink
         /// <summary>
         /// Connect to the OmniDebugLink relay.
         /// </summary>
-        /// <param name="host">Relay origin, e.g. "wss://omnidebuglinkapi.tomfox.cc".</param>
+        /// <param name="host">Relay origin, e.g. "wss://api.omnidebuglink.dev".</param>
         /// <param name="clientToken">Client (device-side) token minted via POST /register.</param>
         /// <param name="reconnectMaxMs">Reconnect backoff cap in ms (default 30000).</param>
         public static void Start(string host, string clientToken, int reconnectMaxMs = 30_000)
@@ -187,8 +184,8 @@ namespace OmniDebugLink
 
         internal LinkState ClientState => Client?.State ?? LinkState.Stopped;
 
-        // Application.* is main-thread-only; captured once on Start so the
-        // capability hello can be built from the background connect thread.
+        // Application.* is main-thread-only; captured once on Start so the capability
+        // hello can be built no matter which thread a registry change fires from.
         private string _platform;
         private string _appVersion;
         private string _unityVersion;
@@ -198,8 +195,8 @@ namespace OmniDebugLink
             _platform = Application.platform.ToString();
             _appVersion = Application.version;
             _unityVersion = Application.unityVersion;
-            // Captured on the main thread so background state changes can notify subscribers there.
-            Client = new OmniDebugLinkClient(url, reconnectMaxMs, SynchronizationContext.Current);
+            // All transport events arrive on the main thread, so the client needs no marshalling.
+            Client = new OmniDebugLinkClient(url, reconnectMaxMs);
             Client.Connected += SendCapabilityHello;
             OmniDebugLink.Tasks.Changed += OnTasksChanged;
             Client.Start();
@@ -259,8 +256,10 @@ namespace OmniDebugLink
 
         private void Update()
         {
-            if (Client == null) return;
-            while (Client.TryDequeueTask(out var task))
+            var client = Client;
+            if (client == null) return;
+            client.Tick(); // outgoing flush + reconnect backoff + heartbeat
+            while (client.TryDequeueTask(out var task))
             {
                 ExecuteTask(task);
             }
@@ -323,59 +322,59 @@ namespace OmniDebugLink
         private void OnDestroy() => Client?.Dispose();
     }
 
-    /// <summary>WebSocket client. All network I/O lives on background threads; task execution is marshalled to the main thread via a queue read by <see cref="OmniDebugLinkBehaviour.Update"/>.</summary>
+    /// <summary>
+    /// WebSocket client on top of the vendored UnityWebSocket transport (Runtime/UnityWebSocket):
+    /// browser WebSocket via jslib on WebGL, ClientWebSocket on every other platform (editor
+    /// included). All transport events arrive on the main thread — manager Update natively, jslib
+    /// callbacks on WebGL — so this class runs no loops of its own; sends, reconnect backoff and
+    /// the heartbeat are driven by <see cref="Tick"/> from <see cref="OmniDebugLinkBehaviour.Update"/>.
+    /// </summary>
     internal sealed class OmniDebugLinkClient : IDisposable
     {
-        private const int ReceiveChunk = 16 * 1024;
-
         /// <summary>Monotonic milliseconds (Environment.TickCount64 is unavailable on Unity Mono).</summary>
         private static long MonotonicMs() =>
             System.Diagnostics.Stopwatch.GetTimestamp() * 1000 / System.Diagnostics.Stopwatch.Frequency;
 
         private readonly string _url;
         private readonly int _reconnectMaxMs;
-        private readonly SynchronizationContext _mainThread;
         private readonly ConcurrentQueue<OmniDebugLinkTask> _incoming = new();
+        // Sends are funneled through a queue drained on the main thread so any thread may call
+        // SendRaw/SendResult (e.g. Tasks.Register from a worker) even on WebGL, where nothing
+        // outside the main thread may touch the browser socket.
         private readonly ConcurrentQueue<string> _outgoing = new();
-        private readonly SemaphoreSlim _outgoingSignal = new(0, int.MaxValue);
 
-        private CancellationTokenSource _cts = new();
-        private ClientWebSocket _ws;
-        private long _lastServerMessage;
+        private UnityWebSocket.WebSocket _ws;
+        private bool _disposed;
         /// <summary>Set when the server closed us with 4000 (same token used by a newer
         /// connection). Stops the reconnect loop instead of fighting for the slot.</summary>
         private bool _replacedByNewerConnection;
+        private int _backoffMs = 1_000;
+        /// <summary>Monotonic deadline for the next reconnect attempt; 0 = none pending.</summary>
+        private long _reconnectAtMs;
+        private long _lastServerMessage;
+        private long _lastPingMs;
 
         internal LinkState State { get; private set; }
-        private int _mainThreadStateQueued;
 
-        /// <summary>Raised on a background thread each time the WebSocket connects.</summary>
+        /// <summary>Raised on the main thread each time the WebSocket connects.</summary>
         internal event Action Connected;
 
-        public OmniDebugLinkClient(
-            string url, int reconnectMaxMs, SynchronizationContext mainThread)
+        public OmniDebugLinkClient(string url, int reconnectMaxMs)
         {
             _url = url;
             _reconnectMaxMs = reconnectMaxMs;
-            _mainThread = mainThread;
         }
 
-        public void Start()
-        {
-            Task.Run(() => RunAsync(_cts.Token));
-        }
+        public void Start() => Connect();
 
         public void Dispose()
         {
-            if (_cts == null) return;
-            try
-            {
-                _cts.Cancel();
-                _ws?.Abort();
-            }
-            catch { /* shutting down */ }
+            if (_disposed) return;
+            _disposed = true;
+            _reconnectAtMs = 0;
+            try { _ws?.CloseAsync(); } catch { /* shutting down */ }
+            _ws = null;
             SetState(LinkState.Stopped);
-            _cts = null;
         }
 
         internal bool TryDequeueTask(out OmniDebugLinkTask task) => _incoming.TryDequeue(out task!);
@@ -410,122 +409,89 @@ namespace OmniDebugLink
             EnqueueOutgoing(msg.ToString(Newtonsoft.Json.Formatting.None));
         }
 
-        private void EnqueueOutgoing(string json)
-        {
-            _outgoing.Enqueue(json);
-            try { _outgoingSignal.Release(); } catch (SemaphoreFullException) { }
-        }
+        private void EnqueueOutgoing(string json) => _outgoing.Enqueue(json);
 
-        private void SetState(LinkState state)
+        /// <summary>Main-thread pump called every frame: flush queued sends, fire due
+        /// reconnects, send heartbeats and run the no-traffic watchdog.</summary>
+        internal void Tick()
         {
-            State = state;
-            // Marshal the notification to the main thread on the next player loop tick.
-            if (Interlocked.Exchange(ref _mainThreadStateQueued, 1) == 0)
+            var ws = _ws;
+            if (ws != null)
             {
-                var ctx = _mainThread;
-                if (ctx == null)
-                {
-                    Interlocked.Exchange(ref _mainThreadStateQueued, 0);
-                    return;
-                }
-                ctx.Post(_ =>
-                {
-                    Interlocked.Exchange(ref _mainThreadStateQueued, 0);
-                    OmniDebugLink.RaiseStateChanged(State);
-                }, null);
+                while (_outgoing.TryDequeue(out var json))
+                    ws.SendAsync(json);
             }
-        }
 
-        private async Task RunAsync(CancellationToken ct)
-        {
-            var backoffMs = 1_000;
-            while (!ct.IsCancellationRequested)
+            if (_disposed || _replacedByNewerConnection) return;
+            var now = MonotonicMs();
+            if (_reconnectAtMs > 0 && now >= _reconnectAtMs)
             {
-                SetState(LinkState.Connecting);
-                ClientWebSocket ws = null;
-                try
-                {
-                    ws = new ClientWebSocket();
-                    _ws = ws;
-                    await ws.ConnectAsync(new Uri(_url), ct);
-                    _lastServerMessage = MonotonicMs();
-                    SetState(LinkState.Connected);
-                    Connected?.Invoke();
-                    backoffMs = 1_000;
-
-                    using var connectionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                    var receive = ReceiveLoopAsync(ws, connectionCts.Token);
-                    var send = SendLoopAsync(ws, connectionCts.Token);
-                    var heartbeat = HeartbeatLoopAsync(ws, connectionCts.Token);
-                    // Wait for the first loop to finish (normally by throwing), then
-                    // cancel the siblings so they don't linger as unobserved tasks.
-                    var first = await Task.WhenAny(receive, send, heartbeat);
-                    connectionCts.Cancel();
-                    try { await Task.WhenAll(receive, send, heartbeat); }
-                    catch { /* already surfaced via first, or sibling cancellation */ }
-                    await first;
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-                catch (Exception e)
-                {
-                    Debug.Log($"[OmniDebugLink] connection error: {e.Message}");
-                }
-                finally
-                {
-                    _ws = null;
-                    try { ws?.Dispose(); } catch { }
-                }
-
-                if (ct.IsCancellationRequested) break;
-                if (_replacedByNewerConnection)
-                {
-                    Debug.LogWarning(
-                        "[OmniDebugLink] token slot taken over by another connection (close 4000) — " +
-                        "stopping reconnects. One token pair belongs to ONE device; mint a separate " +
-                        "pair per device (console → 新建 token 对) and Stop()/Start() this client with it.");
-                    break;
-                }
-                SetState(LinkState.Connecting);
-                try { await Task.Delay(backoffMs, ct); } catch (OperationCanceledException) { break; }
-                backoffMs = Math.Min(backoffMs * 2, _reconnectMaxMs);
+                _reconnectAtMs = 0;
+                Connect();
+                return;
             }
-            SetState(LinkState.Stopped);
-        }
 
-        private async Task ReceiveLoopAsync(ClientWebSocket ws, CancellationToken ct)
-        {
-            var buffer = new byte[ReceiveChunk];
-            while (!ct.IsCancellationRequested && ws.State == WebSocketState.Open)
+            ws = _ws;
+            if (State != LinkState.Connected || ws == null) return;
+            if (now - _lastPingMs < OmniDebugLink.HeartbeatMs) return;
+            _lastPingMs = now;
+            // Watchdog: no traffic at all for ~3 heartbeat intervals → the connection
+            // is presumed dead; abandon it and reconnect without waiting for the close
+            // handshake, which may never complete on a silently dropped connection.
+            if (now - _lastServerMessage > OmniDebugLink.WatchdogMs)
             {
-                var sb = new StringBuilder();
-                WebSocketReceiveResult received;
-                do
-                {
-                    received = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
-                    if (received.MessageType == WebSocketMessageType.Close)
-                    {
-                        // 4000 = another connection took over this token's slot
-                        // (relay-side "replaced by new connection"). Reconnecting
-                        // would just kick the other side and ping-pong forever.
-                        if (received.CloseStatus.HasValue && (int)received.CloseStatus.Value == 4000)
-                            _replacedByNewerConnection = true;
-                        throw new WebSocketException($"server closed connection ({received.CloseStatus})");
-                    }
-                    sb.Append(Encoding.UTF8.GetString(buffer, 0, received.Count));
-                } while (!received.EndOfMessage);
-
-                HandleServerMessage(sb.ToString());
+                Debug.LogWarning("[OmniDebugLink] heartbeat watchdog: server went silent, reconnecting");
+                _ws = null; // its close event (whenever it lands) is ignored
+                try { ws.CloseAsync(); } catch { }
+                ScheduleReconnect();
+                return;
             }
+            SendRaw("{\"v\":1,\"type\":\"ping\"}");
         }
 
-        private void HandleServerMessage(string json)
+        private void Connect()
         {
+            SetState(LinkState.Connecting);
+            var ws = new UnityWebSocket.WebSocket(_url);
+            ws.OnOpen += HandleOpen;
+            ws.OnMessage += HandleMessage;
+            ws.OnError += HandleError;
+            ws.OnClose += HandleClose;
+            _ws = ws;
+            ws.ConnectAsync();
+        }
+
+        private void ScheduleReconnect()
+        {
+            SetState(LinkState.Connecting);
+            _reconnectAtMs = MonotonicMs() + _backoffMs;
+            _backoffMs = Math.Min(_backoffMs * 2, _reconnectMaxMs);
+        }
+
+        // ----- transport events (main thread: manager Update natively, jslib callback on WebGL) -----
+
+        private void HandleOpen(object sender, OpenEventArgs e)
+        {
+            var ws = (UnityWebSocket.WebSocket)sender;
+            if (!ReferenceEquals(sender, _ws) || _disposed)
+            {
+                try { ws.CloseAsync(); } catch { }
+                return;
+            }
             _lastServerMessage = MonotonicMs();
+            _lastPingMs = _lastServerMessage;
+            _backoffMs = 1_000;
+            SetState(LinkState.Connected);
+            Connected?.Invoke(); // capability hello goes out on the next Tick
+        }
+
+        private void HandleMessage(object sender, MessageEventArgs e)
+        {
+            if (_disposed || !e.IsText) return;
+            _lastServerMessage = MonotonicMs();
+
             JObject msg;
-            try { msg = JObject.Parse(json); } catch { return; }
+            try { msg = JObject.Parse(e.Data); } catch { return; }
             if ((int?)msg["v"] != 1) return;
 
             switch ((string)msg["type"])
@@ -544,33 +510,44 @@ namespace OmniDebugLink
             }
         }
 
-        private async Task SendLoopAsync(ClientWebSocket ws, CancellationToken ct)
+        private void HandleError(object sender, ErrorEventArgs e) =>
+            Debug.Log($"[OmniDebugLink] connection error: {e.Message}");
+
+        private void HandleClose(object sender, CloseEventArgs e)
         {
-            while (!ct.IsCancellationRequested && ws.State == WebSocketState.Open)
+            // Events from a socket we already abandoned (watchdog reset) are irrelevant —
+            // they must not schedule extra reconnects.
+            if (!ReferenceEquals(sender, _ws)) return;
+            _ws = null;
+
+            if (_disposed)
             {
-                await _outgoingSignal.WaitAsync(ct);
-                while (_outgoing.TryDequeue(out var json))
-                {
-                    await ws.SendAsync(
-                        new ArraySegment<byte>(Encoding.UTF8.GetBytes(json)),
-                        WebSocketMessageType.Text, true, ct);
-                }
+                SetState(LinkState.Stopped);
+                return;
             }
+            if (e.Code == 4000)
+            {
+                // 4000 = another connection took over this token's slot (relay-side
+                // "replaced by new connection"). Reconnecting would just kick the other
+                // side and ping-pong forever.
+                _replacedByNewerConnection = true;
+                _reconnectAtMs = 0;
+                Debug.LogWarning(
+                    "[OmniDebugLink] token slot taken over by another connection (close 4000) — " +
+                    "stopping reconnects. One token pair belongs to ONE device; mint a separate " +
+                    "pair per device (console → 新建 token 对) and Stop()/Start() this client with it.");
+                SetState(LinkState.Stopped);
+                return;
+            }
+
+            Debug.Log($"[OmniDebugLink] connection closed (code {e.Code}), reconnecting in {_backoffMs} ms");
+            ScheduleReconnect();
         }
 
-        private async Task HeartbeatLoopAsync(ClientWebSocket ws, CancellationToken ct)
+        private void SetState(LinkState state)
         {
-            while (!ct.IsCancellationRequested && ws.State == WebSocketState.Open)
-            {
-                await Task.Delay(OmniDebugLink.HeartbeatMs, ct);
-                // Watchdog: no traffic at all for ~3 heartbeat intervals → the connection
-                // is presumed dead; drop it so the run loop reconnects.
-                if (MonotonicMs() - _lastServerMessage > OmniDebugLink.WatchdogMs)
-                    throw new WebSocketException("heartbeat watchdog: server went silent");
-                await ws.SendAsync(
-                    new ArraySegment<byte>(Encoding.UTF8.GetBytes("{\"v\":1,\"type\":\"ping\"}")),
-                    WebSocketMessageType.Text, true, ct);
-            }
+            State = state;
+            OmniDebugLink.RaiseStateChanged(state);
         }
     }
 }

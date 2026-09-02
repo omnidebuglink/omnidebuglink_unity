@@ -1,11 +1,16 @@
 # OmniDebugLink Unity SDK
 
 OmniDebugLink client SDK for Unity (UPM package, `com.omnidebuglink.unity`):
-connect a running Unity player (editor, device or standalone) to the
+connect a running Unity player (editor, device, standalone or WebGL) to the
 OmniDebugLink relay so AI coding tools (via MCP) can inspect and drive the
 scene — traverse the scene hierarchy, click/tap UI and world objects,
 capture screenshots, read logs, inspect performance, and edit component
 fields via reflection.
+
+Works on WebGL builds as well as native platforms: the bundled UnityWebSocket
+transport picks the browser WebSocket (jslib) on WebGL and
+`ClientWebSocket` everywhere else, with all events dispatched on the main
+thread.
 
 ## Install (UPM git URL)
 
@@ -30,7 +35,7 @@ public class Boot : MonoBehaviour
 {
     void Start()
     {
-        OmniDebugLink.Start("wss://api.omnidebuglink.dev/ws?token=<clientToken>");
+        OmniDebugLink.Start("wss://api.omnidebuglink.dev", "<clientToken>");
     }
 }
 ```
@@ -62,4 +67,8 @@ top-left; task descriptions state it explicitly).
 
 ## License
 
-Same as the OmniDebugLink project.
+Released under the [MIT License](LICENSE). This package bundles a trimmed
+copy of [UnityWebSocket](https://github.com/psygames/UnityWebSocket) (MIT) in
+`Runtime/UnityWebSocket` — see
+[Third Party Notices.md](Third%20Party%20Notices.md) for attribution and the
+full license text.
