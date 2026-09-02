@@ -107,7 +107,7 @@ namespace OmniDebugLink
         public const int WatchdogMs = 180_000;
 
         /// <summary>Client library version, reported in the capability hello.</summary>
-        public const string LibVersion = "0.5.0";
+        public const string LibVersion = "0.6.0";
 
         /// <summary>
         /// Master switch for write/action tasks (ui_click, set_component, set_active, tap_screen...).

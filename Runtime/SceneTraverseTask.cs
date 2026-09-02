@@ -166,25 +166,54 @@ namespace OmniDebugLink
         }
 
         /// <summary>
-        /// The display text this node renders, or null: UGUI Text, an InputField's current
-        /// value, or TextMeshPro's text via reflection (TMP is a package dependency, so it
-        /// cannot be referenced directly). Shared with find_objects / ui_click so "find by
-        /// visible text" works the way it does on the other clients.
+        /// The display text this node renders, or null. Coverage: UGUI Text and InputField
+        /// (direct references), TextMeshPro including TMP_InputField and NGUI UILabel, and
+        /// FairyGUI (UIPainter → gOwner GObject's text/title) — all by type name +
+        /// reflection, since package/plugin types cannot be referenced directly and may
+        /// not exist in the host. Shared with find_objects / ui_click so "find by visible
+        /// text" works like the other clients.
         /// </summary>
         internal static string DisplayTextOf(Component[] comps)
         {
             foreach (var c in comps)
             {
+                if (c == null) continue; // missing script
                 if (c is Text label) return label.text;
                 if (c is InputField field) return field.text;
-                var typeName = c == null ? null : c.GetType().Name;
-                if (typeName == "TextMeshProUGUI" || typeName == "TextMeshPro" || typeName == "TMP_Text")
+
+                string s;
+                // Short type names only: Type.Name is a cached string, so the per-node
+                // path allocates nothing. Never use GetType().FullName here — it builds a
+                // new string on every call and this runs for every component of every
+                // node (up to the 20k scan cap).
+                switch (c.GetType().Name)
                 {
-                    if (c.GetType().GetProperty("text")?.GetValue(c, null) is string s)
-                        return s;
+                    case "TextMeshProUGUI":
+                    case "TextMeshPro":
+                    case "TMP_Text":
+                    case "TMP_InputField":
+                    case "UILabel": // NGUI
+                        s = ReflectString(c, "text");
+                        break;
+                    case "UIPainter": // FairyGUI: gOwner is the logical GObject (GTextField.text / GButton.title)
+                    {
+                        var g = ViewComponentTask.FindFairyGuiOwner(new[] { c });
+                        s = g == null ? null : ReflectString(g, "text") ?? ReflectString(g, "title");
+                        break;
+                    }
+                    default:
+                        s = null;
+                        break;
                 }
+                if (s != null) return s;
             }
             return null;
+        }
+
+        private static string ReflectString(object o, string property)
+        {
+            try { return o.GetType().GetProperty(property)?.GetValue(o, null) as string; }
+            catch { return null; } // getter threw / wrong type — treat as no text
         }
 
         private static Transform FindChild(Transform parent, string name)
