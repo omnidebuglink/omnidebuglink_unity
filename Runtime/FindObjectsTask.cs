@@ -39,12 +39,17 @@ namespace OmniDebugLink
         private static Task<object> Handle(OmniDebugLinkTask task)
         {
             var p = task.Payload;
-            var name = ((string)p["name"])?.Trim();
+            // Cross-platform habit: the other clients' find_objects match by "text" —
+            // accept it as an alias so AI tools moving between platforms don't trip.
+            var name = (((string)p["name"]) ?? (string)p["text"])?.Trim();
             var useRegex = p["regex"]?.Value<bool>() ?? false;
             var component = ((string)p["component"])?.Trim();
             var activeOnly = p["active_only"]?.Value<bool>() ?? true;
             if (string.IsNullOrEmpty(name) && string.IsNullOrEmpty(component))
-                throw new ArgumentException("provide name and/or component to match");
+                throw new ArgumentException(
+                    "provide 'name' (substring, case-insensitive, or a regex with regex=true) " +
+                    "and/or 'component' to match" + DescribePayloadKeys(p) +
+                    "; to dump the whole scene use scene_traverse instead");
 
             Regex regex = null;
             if (useRegex && !string.IsNullOrEmpty(name))
@@ -71,6 +76,17 @@ namespace OmniDebugLink
                 ["truncated"] = truncated,
                 ["objects"] = matches,
             });
+        }
+
+        /// <summary>Append the payload's actual keys to a validation error, so an AI
+        /// sending a wrongly-named field can correct itself in one round-trip.</summary>
+        private static string DescribePayloadKeys(JObject p)
+        {
+            var keys = new List<string>();
+            foreach (var prop in p.Properties()) keys.Add(prop.Name);
+            return keys.Count == 0
+                ? " (payload was empty)"
+                : $" (payload keys sent: {string.Join(", ", keys)})";
         }
 
         private static void Scan(Transform t, string sceneName, bool ddol, string name, Regex regex,
