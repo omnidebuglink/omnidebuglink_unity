@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
@@ -98,11 +99,32 @@ namespace OmniDebugLink
     /// </summary>
     public static class OmniDebugLink
     {
-        /// <summary>Default heartbeat interval in milliseconds.</summary>
-        public const int HeartbeatMs = 15_000;
+        /// <summary>
+        /// Heartbeat interval. Long enough (55s) that an idle relay DO can hibernate
+        /// between beats; the connection itself stays alive without app-level pings.
+        /// </summary>
+        public const int HeartbeatMs = 55_000;
+
+        /// <summary>No-traffic watchdog: presume the connection dead after this.</summary>
+        public const int WatchdogMs = 180_000;
 
         /// <summary>Client library version, reported in the capability hello.</summary>
-        public const string LibVersion = "0.2.0";
+        public const string LibVersion = "0.5.0";
+
+        /// <summary>
+        /// Master switch for write/action tasks (ui_click, set_component, set_active, tap_screen...).
+        /// Read tasks always work. Reported in the capability hello; set false to make the
+        /// device observation-only.
+        /// </summary>
+        public static bool ActionsEnabled = true;
+
+        /// <summary>Throws when write/action tasks are disabled via ActionsEnabled.</summary>
+        internal static void EnsureActionsEnabled()
+        {
+            if (!ActionsEnabled)
+                throw new InvalidOperationException(
+                    "write/action tasks are disabled on this device (OmniDebugLink.ActionsEnabled = false)");
+        }
 
         private static OmniDebugLinkBehaviour _behaviour;
 
@@ -142,12 +164,14 @@ namespace OmniDebugLink
             _behaviour = go.AddComponent<OmniDebugLinkBehaviour>();
             _behaviour.StartClient(url, reconnectMaxMs);
             BuiltinTasks.RegisterAll(Tasks);
+            DeviceLogBuffer.Attach(); // game-log capture for read_logs
         }
 
         /// <summary>Disconnect and tear down. Safe to call repeatedly.</summary>
         public static void Stop()
         {
             if (_behaviour == null) return;
+            DeviceLogBuffer.Detach();
             _behaviour.StopClient();
             _behaviour = null;
         }
@@ -163,8 +187,17 @@ namespace OmniDebugLink
 
         internal LinkState ClientState => Client?.State ?? LinkState.Stopped;
 
+        // Application.* is main-thread-only; captured once on Start so the
+        // capability hello can be built from the background connect thread.
+        private string _platform;
+        private string _appVersion;
+        private string _unityVersion;
+
         internal void StartClient(string url, int reconnectMaxMs)
         {
+            _platform = Application.platform.ToString();
+            _appVersion = Application.version;
+            _unityVersion = Application.unityVersion;
             // Captured on the main thread so background state changes can notify subscribers there.
             Client = new OmniDebugLinkClient(url, reconnectMaxMs, SynchronizationContext.Current);
             Client.Connected += SendCapabilityHello;
@@ -213,10 +246,11 @@ namespace OmniDebugLink
                 ["type"] = "hello",
                 ["client"] = new JObject
                 {
-                    ["platform"] = Application.platform.ToString(),
-                    ["version"] = Application.version,
-                    ["unityVersion"] = Application.unityVersion,
+                    ["platform"] = _platform,
+                    ["version"] = _appVersion,
+                    ["unityVersion"] = _unityVersion,
                     ["libVersion"] = OmniDebugLink.LibVersion,
+                    ["actionsEnabled"] = OmniDebugLink.ActionsEnabled, // plain bool, thread-safe to read
                 },
                 ["tasks"] = tasks,
             };
@@ -230,6 +264,30 @@ namespace OmniDebugLink
             {
                 ExecuteTask(task);
             }
+        }
+
+        /// <summary>Current behaviour instance; lets tasks run coroutines.</summary>
+        internal static OmniDebugLinkBehaviour Current { get; private set; }
+
+        /// <summary>
+        /// Run func at the end of the current frame (after rendering). Required for
+        /// APIs like ScreenCapture.CaptureScreenshotAsTexture that only work once
+        /// the frame's rendering has finished. Continues on the main thread.
+        /// </summary>
+        internal static Task<T> AtEndOfFrame<T>(Func<T> func)
+        {
+            var runner = Current;
+            if (runner == null) return Task.FromResult(func()); // no runner: best effort now
+            var tcs = new TaskCompletionSource<T>();
+            runner.StartCoroutine(EndOfFrameRoutine(func, tcs));
+            return tcs.Task;
+        }
+
+        private static System.Collections.IEnumerator EndOfFrameRoutine<T>(Func<T> func, TaskCompletionSource<T> tcs)
+        {
+            yield return new WaitForEndOfFrame();
+            try { tcs.SetResult(func()); }
+            catch (Exception e) { tcs.SetException(e); }
         }
 
         private async void ExecuteTask(OmniDebugLinkTask task)
@@ -257,6 +315,7 @@ namespace OmniDebugLink
         private void Awake()
         {
             DontDestroyOnLoadTransform = transform;
+            Current = this;
         }
 
         private void OnApplicationQuit() => StopClient();
@@ -269,6 +328,10 @@ namespace OmniDebugLink
     {
         private const int ReceiveChunk = 16 * 1024;
 
+        /// <summary>Monotonic milliseconds (Environment.TickCount64 is unavailable on Unity Mono).</summary>
+        private static long MonotonicMs() =>
+            System.Diagnostics.Stopwatch.GetTimestamp() * 1000 / System.Diagnostics.Stopwatch.Frequency;
+
         private readonly string _url;
         private readonly int _reconnectMaxMs;
         private readonly SynchronizationContext _mainThread;
@@ -279,6 +342,9 @@ namespace OmniDebugLink
         private CancellationTokenSource _cts = new();
         private ClientWebSocket _ws;
         private long _lastServerMessage;
+        /// <summary>Set when the server closed us with 4000 (same token used by a newer
+        /// connection). Stops the reconnect loop instead of fighting for the slot.</summary>
+        private bool _replacedByNewerConnection;
 
         internal LinkState State { get; private set; }
         private int _mainThreadStateQueued;
@@ -382,7 +448,7 @@ namespace OmniDebugLink
                     ws = new ClientWebSocket();
                     _ws = ws;
                     await ws.ConnectAsync(new Uri(_url), ct);
-                    _lastServerMessage = Environment.TickCount64;
+                    _lastServerMessage = MonotonicMs();
                     SetState(LinkState.Connected);
                     Connected?.Invoke();
                     backoffMs = 1_000;
@@ -414,6 +480,14 @@ namespace OmniDebugLink
                 }
 
                 if (ct.IsCancellationRequested) break;
+                if (_replacedByNewerConnection)
+                {
+                    Debug.LogWarning(
+                        "[OmniDebugLink] token slot taken over by another connection (close 4000) — " +
+                        "stopping reconnects. One token pair belongs to ONE device; mint a separate " +
+                        "pair per device (console → 新建 token 对) and Stop()/Start() this client with it.");
+                    break;
+                }
                 SetState(LinkState.Connecting);
                 try { await Task.Delay(backoffMs, ct); } catch (OperationCanceledException) { break; }
                 backoffMs = Math.Min(backoffMs * 2, _reconnectMaxMs);
@@ -432,7 +506,14 @@ namespace OmniDebugLink
                 {
                     received = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
                     if (received.MessageType == WebSocketMessageType.Close)
+                    {
+                        // 4000 = another connection took over this token's slot
+                        // (relay-side "replaced by new connection"). Reconnecting
+                        // would just kick the other side and ping-pong forever.
+                        if (received.CloseStatus.HasValue && (int)received.CloseStatus.Value == 4000)
+                            _replacedByNewerConnection = true;
                         throw new WebSocketException($"server closed connection ({received.CloseStatus})");
+                    }
                     sb.Append(Encoding.UTF8.GetString(buffer, 0, received.Count));
                 } while (!received.EndOfMessage);
 
@@ -442,7 +523,7 @@ namespace OmniDebugLink
 
         private void HandleServerMessage(string json)
         {
-            _lastServerMessage = Environment.TickCount64;
+            _lastServerMessage = MonotonicMs();
             JObject msg;
             try { msg = JObject.Parse(json); } catch { return; }
             if ((int?)msg["v"] != 1) return;
@@ -484,7 +565,7 @@ namespace OmniDebugLink
                 await Task.Delay(OmniDebugLink.HeartbeatMs, ct);
                 // Watchdog: no traffic at all for ~3 heartbeat intervals → the connection
                 // is presumed dead; drop it so the run loop reconnects.
-                if (Environment.TickCount64 - _lastServerMessage > OmniDebugLink.HeartbeatMs * 3)
+                if (MonotonicMs() - _lastServerMessage > OmniDebugLink.WatchdogMs)
                     throw new WebSocketException("heartbeat watchdog: server went silent");
                 await ws.SendAsync(
                     new ArraySegment<byte>(Encoding.UTF8.GetBytes("{\"v\":1,\"type\":\"ping\"}")),

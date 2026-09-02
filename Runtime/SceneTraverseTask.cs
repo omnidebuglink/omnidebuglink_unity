@@ -98,8 +98,8 @@ namespace OmniDebugLink
             return result;
         }
 
-        /// <summary>All loaded scenes + the DontDestroyOnLoad scene (via our marker object).</summary>
-        private static List<(string name, bool ddol, IEnumerable<Transform> roots)> RuntimeScenes()
+        /// <summary>All loaded scenes + the DontDestroyOnLoad scene (via our marker object). Shared with other tasks.</summary>
+        internal static List<(string name, bool ddol, IEnumerable<Transform> roots)> RuntimeScenes()
         {
             var scenes = new List<(string, bool, IEnumerable<Transform>)>();
             for (var i = 0; i < SceneManager.sceneCount; i++)
@@ -127,7 +127,8 @@ namespace OmniDebugLink
                 yield return go.transform;
         }
 
-        private static Transform FindByPath(
+        /// <summary>Find a Transform by "/"-separated path across all runtime scenes. Returns null when not found.</summary>
+        internal static Transform FindByPath(
             string path, List<(string name, bool ddol, IEnumerable<Transform> roots)> scenes)
         {
             var parts = path.Split('/');
@@ -147,6 +148,19 @@ namespace OmniDebugLink
                 }
             }
             return null;
+        }
+
+        /// <summary>Reverse of FindByPath: build a "/"-separated scene-root path for a Transform.</summary>
+        internal static string BuildPath(Transform t)
+        {
+            var sb = new System.Text.StringBuilder(t.name);
+            var p = t.parent;
+            while (p != null)
+            {
+                sb.Insert(0, p.name + "/");
+                p = p.parent;
+            }
+            return sb.ToString();
         }
 
         private static Transform FindChild(Transform parent, string name)

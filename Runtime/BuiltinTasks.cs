@@ -43,6 +43,28 @@ namespace OmniDebugLink
 
             // Runtime GameObject hierarchy traversal (whole scene, including UI).
             SceneTraverseTask.Register(registry);
+
+            // Screen capture as base64 JPEG.
+            ScreenshotTask.Register(registry);
+
+            // Component inspection.
+            ListComponentTask.Register(registry);
+            ViewComponentTask.Register(registry);
+
+            // Actions (guarded by OmniDebugLink.ActionsEnabled).
+            UiClickTask.Register(registry);
+            SetComponentTask.Register(registry);
+            SetActiveTask.Register(registry);
+            TapScreenTask.Register(registry);
+            SwipeTask.Register(registry);     // swipe + long_press
+            InputTextTask.Register(registry);
+            MiscTasks.Register(registry);     // set_time_scale + prefs + send_key
+
+            // Automation helpers (read side).
+            DeviceLogTask.Register(registry); // read_logs (DeviceLogBuffer)
+            WaitForTask.Register(registry);
+            FindObjectsTask.Register(registry);
+            PerfTask.Register(registry);      // get_perf
         }
     }
 }
