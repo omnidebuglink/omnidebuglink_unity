@@ -9,3 +9,9 @@
 *.csproj
 *.sln
 .DS_Store
+
+# internal docs & root-document metas: never publish
+/CLAUDE.md
+/LICENSE.meta
+/README.md.meta
+/Third Party Notices.md.meta
