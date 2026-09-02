@@ -91,7 +91,7 @@ namespace OmniDebugLink
                 {
                     SafeInvoke(() => dispatch.Invoke(gOwner, new object[] { "onClick", null }));
                     return Task.FromResult<object>(Result(path, locatedBy, "fairygui", true,
-                        "GObject " + gOwner.GetType().Name));
+                        "GObject " + gOwner.GetType().Name, path));
                 }
             }
 
@@ -103,7 +103,10 @@ namespace OmniDebugLink
                 SafeInvoke(() => ExecuteEvents.Execute(handler, ped, ExecuteEvents.pointerDownHandler));
                 SafeInvoke(() => ExecuteEvents.Execute(handler, ped, ExecuteEvents.pointerUpHandler));
                 SafeInvoke(() => ExecuteEvents.Execute(handler, ped, ExecuteEvents.pointerClickHandler));
-                return Task.FromResult<object>(Result(path, locatedBy, "ugui", true, handler.name));
+                // When text matched a label child, handler is the clickable ancestor (the
+                // Button); report its path so follow-up tasks operate on the right node.
+                return Task.FromResult<object>(Result(path, locatedBy, "ugui", true, handler.name,
+                    SceneTraverseTask.BuildPath(handler.transform)));
             }
 
             // NGUI: classic notify.
@@ -113,12 +116,12 @@ namespace OmniDebugLink
             if (notify != null)
             {
                 SafeInvoke(() => notify.Invoke(null, new object[] { go, "OnClick", null }));
-                return Task.FromResult<object>(Result(path, locatedBy, "ngui", true, go.name));
+                return Task.FromResult<object>(Result(path, locatedBy, "ngui", true, go.name, path));
             }
 
             return Task.FromResult<object>(Result(path, locatedBy, "none", false,
                 "no click handler found (no IPointerClickHandler up the chain, no FairyGUI owner, no UICamera); " +
-                "check list_component"));
+                "check list_component", null));
         }
 
         private static PointerEventData NewPointerData() =>
@@ -132,14 +135,20 @@ namespace OmniDebugLink
             return paths;
         }
 
-        private static JObject Result(string path, string locatedBy, string framework, bool executed, string targetName) => new JObject
+        private static JObject Result(string path, string locatedBy, string framework, bool executed,
+            string targetName, string clicked)
         {
-            ["path"] = path,
-            ["located_by"] = locatedBy,
-            ["framework"] = framework,
-            ["executed"] = executed,
-            ["target"] = targetName,
-        };
+            var o = new JObject
+            {
+                ["path"] = path,
+                ["located_by"] = locatedBy,
+                ["framework"] = framework,
+                ["executed"] = executed,
+                ["target"] = targetName,
+            };
+            if (clicked != null) o["clicked"] = clicked;
+            return o;
+        }
 
         private static void SafeInvoke(Action a)
         {
