@@ -1,13 +1,13 @@
 #if !UNITY_EDITOR && (UNITY_WEBGL || UNITY_MINIGAME)
 using System;
 
-namespace UnityWebSocket
+namespace OmniDebugLink.UnityWebSocket
 {
     public class WebSocket : IWebSocket
     {
         public string Address { get; private set; }
         public string[] SubProtocols { get; private set; }
-        public WebSocketState ReadyState { get { return (WebSocketState)WebSocketManager.WebSocketGetState(instanceId); } }
+        public WebSocketState ReadyState { get { return (WebSocketState)WebSocketManager.OdlWebSocketGetState(instanceId); } }
         public string BinaryType { get; set; } = "arraybuffer";
 
         public event EventHandler<OpenEventArgs> OnOpen;
@@ -46,7 +46,7 @@ namespace UnityWebSocket
             {
                 if (string.IsNullOrEmpty(protocol)) continue;
                 Log($"Add Sub Protocol {protocol}, with instanceId: {instanceId}");
-                int code = WebSocketManager.WebSocketAddSubProtocol(instanceId, protocol);
+                int code = WebSocketManager.OdlWebSocketAddSubProtocol(instanceId, protocol);
                 if (code < 0)
                 {
                     HandleOnError(GetErrorMessageFromCode(code));
@@ -58,35 +58,35 @@ namespace UnityWebSocket
         ~WebSocket()
         {
             Log($"Free socket with instanceId: {instanceId}");
-            WebSocketManager.WebSocketFree(instanceId);
+            WebSocketManager.OdlWebSocketFree(instanceId);
         }
 
         public void ConnectAsync()
         {
             Log($"Connect with instanceId: {instanceId}");
             WebSocketManager.Add(this);
-            int code = WebSocketManager.WebSocketConnect(instanceId);
+            int code = WebSocketManager.OdlWebSocketConnect(instanceId);
             if (code < 0) HandleOnError(GetErrorMessageFromCode(code));
         }
 
         public void CloseAsync()
         {
             Log($"Close with instanceId: {instanceId}");
-            int code = WebSocketManager.WebSocketClose(instanceId, (int)CloseStatusCode.Normal, "Normal Closure");
+            int code = WebSocketManager.OdlWebSocketClose(instanceId, (int)CloseStatusCode.Normal, "Normal Closure");
             if (code < 0) HandleOnError(GetErrorMessageFromCode(code));
         }
 
         public void SendAsync(string text)
         {
             Log($"Send, type: {Opcode.Text}, size: {text.Length}");
-            int code = WebSocketManager.WebSocketSendStr(instanceId, text);
+            int code = WebSocketManager.OdlWebSocketSendStr(instanceId, text);
             if (code < 0) HandleOnError(GetErrorMessageFromCode(code));
         }
 
         public void SendAsync(byte[] data)
         {
             Log($"Send, type: {Opcode.Binary}, size: {data.Length}");
-            int code = WebSocketManager.WebSocketSend(instanceId, data, data.Length);
+            int code = WebSocketManager.OdlWebSocketSend(instanceId, data, data.Length);
             if (code < 0) HandleOnError(GetErrorMessageFromCode(code));
         }
 

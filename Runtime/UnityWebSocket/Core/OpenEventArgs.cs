@@ -1,6 +1,6 @@
 using System;
 
-namespace UnityWebSocket
+namespace OmniDebugLink.UnityWebSocket
 {
     public class OpenEventArgs : EventArgs
     {

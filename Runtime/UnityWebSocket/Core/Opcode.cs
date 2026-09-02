@@ -1,4 +1,4 @@
-namespace UnityWebSocket
+namespace OmniDebugLink.UnityWebSocket
 {
     /// <summary>
     /// Indicates the WebSocket frame type.

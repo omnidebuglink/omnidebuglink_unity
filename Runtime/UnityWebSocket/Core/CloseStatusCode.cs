@@ -1,4 +1,4 @@
-namespace UnityWebSocket
+namespace OmniDebugLink.UnityWebSocket
 {
     /// <summary>
     /// Indicates the status code for the WebSocket connection close.

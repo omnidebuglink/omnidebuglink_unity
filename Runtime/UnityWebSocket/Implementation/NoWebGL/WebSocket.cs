@@ -7,7 +7,7 @@ using System.Threading.Tasks;
 using System.Net.WebSockets;
 using System.IO;
 
-namespace UnityWebSocket
+namespace OmniDebugLink.UnityWebSocket
 {
     public class WebSocket : IWebSocket
     {

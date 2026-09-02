@@ -1,7 +1,7 @@
 using System;
 using System.Text;
 
-namespace UnityWebSocket
+namespace OmniDebugLink.UnityWebSocket
 {
     public class MessageEventArgs : EventArgs
     {

@@ -12,7 +12,13 @@ upstream project, what was modified, and the full text of its license.
   implementations, and the WebGL `WebSocket.jslib`). The editor settings
   window, `Settings.cs`, and the standalone assembly definition were removed;
   the remaining sources compile into the `OmniDebugLink` assembly directly.
-  No behavioral changes were made to the library.
+  To avoid clashing with a copy of the upstream library already present in a
+  host project, the C# namespace was renamed `UnityWebSocket` →
+  `OmniDebugLink.UnityWebSocket`, the jslib file is
+  `OmniDebugLinkWebSocket.jslib`, and every jslib entry point (and its
+  `DllImport`) was prefixed with `Odl` (e.g. `OdlWebSocketAllocate`), along
+  with the library/internal-manager JS objects. No behavioral changes were
+  made to the library.
 - License: MIT
 
 ```text

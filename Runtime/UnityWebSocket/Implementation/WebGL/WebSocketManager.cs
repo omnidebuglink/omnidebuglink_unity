@@ -4,7 +4,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using AOT;
 
-namespace UnityWebSocket
+namespace OmniDebugLink.UnityWebSocket
 {
     /// <summary>
     /// Class providing static access methods to work with JSLIB WebSocket
@@ -23,44 +23,44 @@ namespace UnityWebSocket
 
         /* WebSocket JSLIB functions */
         [DllImport("__Internal")]
-        public static extern int WebSocketConnect(int instanceId);
+        public static extern int OdlWebSocketConnect(int instanceId);
 
         [DllImport("__Internal")]
-        public static extern int WebSocketClose(int instanceId, int code, string reason);
+        public static extern int OdlWebSocketClose(int instanceId, int code, string reason);
 
         [DllImport("__Internal")]
-        public static extern int WebSocketSend(int instanceId, byte[] dataPtr, int dataLength);
+        public static extern int OdlWebSocketSend(int instanceId, byte[] dataPtr, int dataLength);
 
         [DllImport("__Internal")]
-        public static extern int WebSocketSendStr(int instanceId, string data);
+        public static extern int OdlWebSocketSendStr(int instanceId, string data);
 
         [DllImport("__Internal")]
-        public static extern int WebSocketGetState(int instanceId);
+        public static extern int OdlWebSocketGetState(int instanceId);
 
         /* WebSocket JSLIB callback setters and other functions */
         [DllImport("__Internal")]
-        public static extern int WebSocketAllocate(string url, string binaryType);
+        public static extern int OdlWebSocketAllocate(string url, string binaryType);
 
         [DllImport("__Internal")]
-        public static extern int WebSocketAddSubProtocol(int instanceId, string protocol);
+        public static extern int OdlWebSocketAddSubProtocol(int instanceId, string protocol);
 
         [DllImport("__Internal")]
-        public static extern void WebSocketFree(int instanceId);
+        public static extern void OdlWebSocketFree(int instanceId);
 
         [DllImport("__Internal")]
-        public static extern void WebSocketSetOnOpen(OnOpenCallback callback);
+        public static extern void OdlWebSocketSetOnOpen(OnOpenCallback callback);
 
         [DllImport("__Internal")]
-        public static extern void WebSocketSetOnMessage(OnMessageCallback callback);
+        public static extern void OdlWebSocketSetOnMessage(OnMessageCallback callback);
 
         [DllImport("__Internal")]
-        public static extern void WebSocketSetOnMessageStr(OnMessageStrCallback callback);
+        public static extern void OdlWebSocketSetOnMessageStr(OnMessageStrCallback callback);
 
         [DllImport("__Internal")]
-        public static extern void WebSocketSetOnError(OnErrorCallback callback);
+        public static extern void OdlWebSocketSetOnError(OnErrorCallback callback);
 
         [DllImport("__Internal")]
-        public static extern void WebSocketSetOnClose(OnCloseCallback callback);
+        public static extern void OdlWebSocketSetOnClose(OnCloseCallback callback);
 
         /* If callbacks was initialized and set */
         private static bool isInitialized = false;
@@ -68,11 +68,11 @@ namespace UnityWebSocket
         /* Initialize WebSocket callbacks to JSLIB */
         private static void Initialize()
         {
-            WebSocketSetOnOpen(DelegateOnOpenEvent);
-            WebSocketSetOnMessage(DelegateOnMessageEvent);
-            WebSocketSetOnMessageStr(DelegateOnMessageStrEvent);
-            WebSocketSetOnError(DelegateOnErrorEvent);
-            WebSocketSetOnClose(DelegateOnCloseEvent);
+            OdlWebSocketSetOnOpen(DelegateOnOpenEvent);
+            OdlWebSocketSetOnMessage(DelegateOnMessageEvent);
+            OdlWebSocketSetOnMessageStr(DelegateOnMessageStrEvent);
+            OdlWebSocketSetOnError(DelegateOnErrorEvent);
+            OdlWebSocketSetOnClose(DelegateOnCloseEvent);
 
             isInitialized = true;
         }
@@ -130,7 +130,7 @@ namespace UnityWebSocket
         internal static int AllocateInstance(string address, string binaryType)
         {
             if (!isInitialized) Initialize();
-            return WebSocketAllocate(address, binaryType);
+            return OdlWebSocketAllocate(address, binaryType);
         }
 
         internal static void Add(WebSocket socket)

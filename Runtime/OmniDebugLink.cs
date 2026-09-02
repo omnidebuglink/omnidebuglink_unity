@@ -4,7 +4,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
-using UnityWebSocket;
+using OmniDebugLink.UnityWebSocket;
 
 namespace OmniDebugLink
 {
@@ -344,7 +344,7 @@ namespace OmniDebugLink
         // outside the main thread may touch the browser socket.
         private readonly ConcurrentQueue<string> _outgoing = new();
 
-        private UnityWebSocket.WebSocket _ws;
+        private WebSocket _ws;
         private bool _disposed;
         /// <summary>Set when the server closed us with 4000 (same token used by a newer
         /// connection). Stops the reconnect loop instead of fighting for the slot.</summary>
@@ -453,7 +453,7 @@ namespace OmniDebugLink
         private void Connect()
         {
             SetState(LinkState.Connecting);
-            var ws = new UnityWebSocket.WebSocket(_url);
+            var ws = new WebSocket(_url);
             ws.OnOpen += HandleOpen;
             ws.OnMessage += HandleMessage;
             ws.OnError += HandleError;
@@ -473,7 +473,7 @@ namespace OmniDebugLink
 
         private void HandleOpen(object sender, OpenEventArgs e)
         {
-            var ws = (UnityWebSocket.WebSocket)sender;
+            var ws = (WebSocket)sender;
             if (!ReferenceEquals(sender, _ws) || _disposed)
             {
                 try { ws.CloseAsync(); } catch { }

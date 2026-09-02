@@ -2,7 +2,7 @@
 using System.Collections.Generic;
 using UnityEngine;
 
-namespace UnityWebSocket
+namespace OmniDebugLink.UnityWebSocket
 {
     [DefaultExecutionOrder(-10000)]
     internal class WebSocketManager : MonoBehaviour
