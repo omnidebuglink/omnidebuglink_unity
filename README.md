@@ -35,7 +35,7 @@ public class Boot : MonoBehaviour
 {
     void Start()
     {
-        OmniDebugLink.Start("wss://api.omnidebuglink.dev", "<clientToken>");
+        OmniDebugLink.Start("<clientToken>");
     }
 }
 ```

@@ -109,6 +109,10 @@ namespace OmniDebugLink
         /// <summary>Client library version, reported in the capability hello.</summary>
         public const string LibVersion = "0.6.0";
 
+        /// <summary>Relay origin, baked in so callers only supply a token.
+        /// Self-hosted relays: point this at your deployment and rebuild.</summary>
+        public const string Host = "wss://api.omnidebuglink.dev";
+
         /// <summary>
         /// Master switch for write/action tasks (ui_click, set_component, set_active, tap_screen...).
         /// Read tasks always work. Reported in the capability hello; set false to make the
@@ -146,16 +150,14 @@ namespace OmniDebugLink
         /// <summary>
         /// Connect to the OmniDebugLink relay.
         /// </summary>
-        /// <param name="host">Relay origin, e.g. "wss://api.omnidebuglink.dev".</param>
         /// <param name="clientToken">Client (device-side) token minted via POST /register.</param>
         /// <param name="reconnectMaxMs">Reconnect backoff cap in ms (default 30000).</param>
-        public static void Start(string host, string clientToken, int reconnectMaxMs = 30_000)
+        public static void Start(string clientToken, int reconnectMaxMs = 30_000)
         {
-            if (string.IsNullOrEmpty(host)) throw new ArgumentNullException(nameof(host));
             if (string.IsNullOrEmpty(clientToken)) throw new ArgumentNullException(nameof(clientToken));
             Stop();
 
-            var url = $"{host.TrimEnd('/')}/ws?token={Uri.EscapeDataString(clientToken)}";
+            var url = $"{Host.TrimEnd('/')}/ws?token={Uri.EscapeDataString(clientToken)}";
             var go = new GameObject("OmniDebugLink (debug)");
             UnityEngine.Object.DontDestroyOnLoad(go);
             go.hideFlags = HideFlags.DontSave;
