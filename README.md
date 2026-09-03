@@ -23,7 +23,7 @@ https://github.com/omnidebuglink/omnidebuglink_unity.git
 Or pin a released tag:
 
 ```
-https://github.com/omnidebuglink/omnidebuglink_unity.git#v0.7.0
+https://github.com/omnidebuglink/omnidebuglink_unity.git#v0.7.0  # pin a tag for reproducibility; drop `#vX.Y.Z` to track main (bleeding edge)
 ```
 
 ## Quick start
