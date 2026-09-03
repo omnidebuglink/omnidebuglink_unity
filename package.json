@@ -1,6 +1,6 @@
 {
   "name": "com.omnidebuglink.unity",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "displayName": "OmniDebugLink",
   "description": "Remote device debugging client for OmniDebugLink. Connects your app to the OmniDebugLink MCP relay so AI coding tools can run tasks on this device from anywhere.",
   "unity": "2021.3",

@@ -107,7 +107,7 @@ namespace OmniDebugLink
         public const int WatchdogMs = 180_000;
 
         /// <summary>Client library version, reported in the capability hello.</summary>
-        public const string LibVersion = "0.6.0";
+        public const string LibVersion = "0.7.0";
 
         /// <summary>Relay origin, baked in so callers only supply a token.
         /// Self-hosted relays: point this at your deployment and rebuild.</summary>

@@ -12,7 +12,10 @@ namespace OmniDebugLink
     ///
     /// Framework dispatch (auto-detected from the target's components):
     ///   UGUI:     PointerEventData + ExecuteEvents (pointerDown → pointerUp → pointerClick),
-    ///             handler resolved up the parent chain like a real tap would.
+    ///             delivered at the target's center through the EventSystem raycast —
+    ///             whatever physically sits on top receives the click (overlays
+    ///             included), exactly like a real tap; direct dispatch only as a
+    ///             fallback when the raycast finds nothing clickable.
     ///   NGUI:     UICamera.Notify(go, "OnClick", null) via reflection.
     ///   FairyGUI: gOwner.DispatchEvent("onClick") via the DisplayObject wrapper.
     /// </summary>
@@ -24,12 +27,14 @@ namespace OmniDebugLink
                 "ui_click",
                 Handle,
                 description:
-                    "Click a UI element through the real event pipeline (UGUI ExecuteEvents " +
-                    "pointerDown/Up/Click, NGUI UICamera.Notify OnClick, or FairyGUI onClick dispatch — " +
-                    "auto-detected). Locate the target either by its scene path or by the text it " +
-                    "renders (text=\"Start\" finds the button whose label says Start and clicks it in " +
-                    "one call; when several nodes match, pick with index). Use tap_screen to click by " +
-                    "normalized screen coordinates instead.",
+                    "Click a UI element like a physical tap would: located by scene path or by the " +
+                    "text it renders (text=\"Start\" finds the button whose label says Start; when " +
+                    "several nodes match, pick with index), then delivered at its center through the " +
+                    "UGUI raycast pipeline — tutorial overlays or blockers sitting on top receive the " +
+                    "click (they usually close the guide and forward to the real target). The result " +
+                    "reports clicked = what actually received it. Falls back to direct dispatch when " +
+                    "nothing clickable is hit. NGUI/FairyGUI dispatch is auto-detected. Use tap_screen " +
+                    "for normalized screen coordinates instead.",
                 payloadSchema:
                     "{\"type\":\"object\",\"properties\":{" +
                     "\"path\":{\"type\":\"string\",\"description\":\"node path from scene root, e.g. \\\"Canvas/Panel/Button\\\"\"}," +
@@ -95,18 +100,72 @@ namespace OmniDebugLink
                 }
             }
 
-            // UGUI: full pointer sequence on the resolved handler.
+            // UGUI: pointer sequence delivered physically. We raycast from the
+            // target's center through the EventSystem (GraphicRaycaster /
+            // PhysicsRaycaster — the same hit-testing a real tap goes through)
+            // and execute on the topmost clickable object. Tutorial overlays and
+            // invisible blockers that sit on top of the button therefore receive
+            // the click like they would for a human (they typically close the
+            // guide and forward to the real target). When the raycast finds
+            // nothing clickable, we fall back to direct dispatch on the
+            // resolved handler so decorative raycastTarget leftovers don't
+            // break automation.
             var handler = ExecuteEvents.GetEventHandler<IPointerClickHandler>(go);
             if (handler != null)
             {
+                var es = EventSystem.current;
                 var ped = NewPointerData();
-                SafeInvoke(() => ExecuteEvents.Execute(handler, ped, ExecuteEvents.pointerDownHandler));
-                SafeInvoke(() => ExecuteEvents.Execute(handler, ped, ExecuteEvents.pointerUpHandler));
-                SafeInvoke(() => ExecuteEvents.Execute(handler, ped, ExecuteEvents.pointerClickHandler));
+                ped.button = PointerEventData.InputButton.Left;
+
+                var receiver = handler; // intended target unless a raycast hit replaces it
+                var via = "direct";
+                string intended = null;
+                string raycastTop = null;
+
+                var center = CenterScreenPoint(handler.transform as RectTransform);
+                if (es != null && center.HasValue)
+                {
+                    ped.position = center.Value;
+                    var hits = new List<RaycastResult>();
+                    es.RaycastAll(ped, hits);
+                    if (hits.Count > 0)
+                    {
+                        var topGo = hits[0].gameObject;
+                        raycastTop = topGo != null ? topGo.name : null;
+                        var topHandler = topGo != null
+                            ? ExecuteEvents.GetEventHandler<IPointerClickHandler>(topGo)
+                            : null;
+                        if (topHandler != null)
+                        {
+                            if (topHandler != handler)
+                                intended = SceneTraverseTask.BuildPath(handler.transform);
+                            receiver = topHandler;
+                            via = "raycast";
+                        }
+                        else
+                        {
+                            via = "direct-fallback";
+                        }
+                    }
+                    else
+                    {
+                        via = "direct-fallback";
+                    }
+                }
+
+                SafeInvoke(() => ExecuteEvents.Execute(receiver, ped, ExecuteEvents.pointerDownHandler));
+                SafeInvoke(() => ExecuteEvents.Execute(receiver, ped, ExecuteEvents.pointerUpHandler));
+                SafeInvoke(() => ExecuteEvents.Execute(receiver, ped, ExecuteEvents.pointerClickHandler));
                 // When text matched a label child, handler is the clickable ancestor (the
-                // Button); report its path so follow-up tasks operate on the right node.
-                return Task.FromResult<object>(Result(path, locatedBy, "ugui", true, handler.name,
-                    SceneTraverseTask.BuildPath(handler.transform)));
+                // Button); with raycast delivery "clicked" is whatever physically received
+                // the click (possibly an overlay) — report its path so follow-up tasks
+                // operate on the right node.
+                var res = Result(path, locatedBy, "ugui", true, receiver.name,
+                    SceneTraverseTask.BuildPath(receiver.transform));
+                res["via"] = via;
+                if (intended != null) res["intended"] = intended;
+                if (via == "direct-fallback" && raycastTop != null) res["raycast_top"] = raycastTop;
+                return Task.FromResult<object>(res);
             }
 
             // NGUI: classic notify.
@@ -126,6 +185,29 @@ namespace OmniDebugLink
 
         private static PointerEventData NewPointerData() =>
             new PointerEventData(EventSystem.current);
+
+        /// <summary>
+        /// Center of a RectTransform in screen pixels, across canvas render modes
+        /// (Overlay passes a null camera; ScreenSpace-Camera / WorldSpace use
+        /// canvas.worldCamera). Null when the point cannot be projected — the
+        /// caller then dispatches directly without raycasting.
+        /// </summary>
+        private static Vector2? CenterScreenPoint(RectTransform rt)
+        {
+            if (rt == null || rt.rect.width <= 0f || rt.rect.height <= 0f) return null;
+            var canvas = rt.GetComponentInParent<Canvas>();
+            if (canvas == null) return null;
+            Camera cam = null;
+            if (canvas.renderMode != RenderMode.ScreenSpaceOverlay)
+            {
+                cam = canvas.worldCamera;
+                if (cam == null && canvas.renderMode == RenderMode.WorldSpace) return null;
+                // ScreenSpace-Camera with a null camera renders like Overlay;
+                // WorldToScreenPoint(null, ...) handles that mapping.
+            }
+            var world = rt.TransformPoint(rt.rect.center);
+            return RectTransformUtility.WorldToScreenPoint(cam, world);
+        }
 
         private static IEnumerable<string> PathsOf(List<FindObjectsTask.Match> matches, int max)
         {
