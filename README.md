@@ -50,15 +50,37 @@ public class Boot : MonoBehaviour
 newer connection with the same token) the SDK stops reconnecting
 permanently and logs a warning.
 
-## Built-in tasks (20)
+## Built-in tasks (21)
 
-Read: `scene_traverse` (scene hierarchy dump) / `find_objects` /
-`view_component` (reflection-based field inspection) / `wait_for` /
-`screenshot` / `read_logs` / `get_perf` / `get_state` / `prefs`
-(PlayerPrefs)
-Write: `ui_click` / `tap_screen` / `swipe` / `long_press` / `input_text` /
-`set_component` (reflection write) / `send_key` (soft dispatch) /
-`prefs` (set/delete)
+Read tasks:
+
+| Task | What it does |
+|---|---|
+| `scene_traverse` | Full scene hierarchy dump (3000-node cap). Nodes that render text carry the live `text` value (UGUI Text / TextMeshPro / InputField), so the AI reads the labels straight from the tree |
+| `find_objects` | Search by node name (substring or regex), **displayed text**, or component type; hits include center coordinates and `click_target` (nearest clickable ancestor) that feeds `ui_click` directly |
+| `view_component` | One node in depth: UGUI + layout properties, NGUI / FairyGUI dictionaries, plus reflection-based field inspection for anything else |
+| `list_component` | List the components attached to a node |
+| `wait_for` | Poll until a path appears or a component field reaches a value (200 ms interval); timeouts return `found: false` instead of an error |
+| `screenshot` | JPEG capture at end of frame via the `__odl_file` envelope; auto-compresses to fit the relay frame budget |
+| `read_logs` | 1000-entry ring buffer of `Debug.Log` / warnings / exceptions with stack traces; level / contains / limit / since filters |
+| `get_perf` | Mono + total memory, GC counts, fps and frame-time percentiles (p50/p95/p99), FrameTiming cpu/gpu times where available, battery |
+| `prefs` | Read PlayerPrefs (get / list) |
+
+Write tasks (all gated by `ActionsEnabled`):
+
+| Task | What it does |
+|---|---|
+| `ui_click` | Delivered physically since v0.7.0: raycasts from the target's center through the EventSystem and executes pointerDown/Up/Click on the topmost clickable object — tutorial overlays and intercept layers receive the click exactly like a real tap. Locates by path or by the text it renders (`text="Start"` clicks the button whose label says Start), `index` disambiguates multiple matches |
+| `tap_screen` | Tap at normalized 0-1 coordinates (bottom-left origin), through the same raycast pipeline |
+| `swipe` | Drag between two points over a duration, per-frame deltas — ScrollRect inertia works |
+| `long_press` | Press, hold (default 800 ms), release |
+| `input_text` | Type into UGUI InputField / TMP, firing the change events |
+| `set_component` | Reflection-based write of any component field |
+| `set_active` | Toggle a GameObject's active state |
+| `set_time_scale` | Set `Time.timeScale` (slow-mo / freeze for inspection) |
+| `send_key` | Soft-dispatch UGUI submit/cancel events (hardware keys cannot be injected in a running player) |
+| `prefs` | Write / delete PlayerPrefs |
+
 Basics: `echo` / `ping` / `get_stats`
 
 Coordinate convention: **normalized 0-1, bottom-left origin** (Unity's own
